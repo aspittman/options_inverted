@@ -252,7 +252,8 @@ class AnalyticsGuardTests(unittest.TestCase):
         self.assertEqual(result["realized_pnl"], 100)
         self.assertEqual(result["unrealized_pnl"], 50)
         self.assertEqual(result["total_pnl"], 150)
-        self.assertEqual(result["return_pct"], 30)
+        self.assertEqual(result["return_pct"], 0.6)
+        self.assertEqual(result["return_on_capital_employed_percent"], 30)
         self.assertEqual(result["open_positions"], 1)
         self.assertEqual(result["positions_value"], 250)
 
@@ -260,7 +261,7 @@ class AnalyticsGuardTests(unittest.TestCase):
             "2026-08-21", current_prices={"AAPL1": 2.5}, strategy="regular"
         )
         self.assertEqual(regular["deployed_premium"], 500)
-        self.assertEqual(regular["return_pct"], 30)
+        self.assertEqual(regular["return_pct"], 0.6)
 
     @patch("analytics.read_events")
     def test_cooldown_counts_trading_days(self, read_events):
@@ -354,10 +355,17 @@ class TrailingStopTests(unittest.TestCase):
         }
         submit_order.return_value = MagicMock(id="order-1", status="pending_new")
 
-        close_strategy_lot(
-            "regular", "BAC", "BAC261016P00062500", 1,
-            "underlying_trailing_stop_-3.00%",
-        )
+        # Exits now require both recorded ownership and available broker longs.
+        with patch("options_trader.get_strategy_open_lots", return_value={
+            ("regular", "BAC", "BAC261016P00062500"): {"qty": 1}
+        }), patch.object(options_trader.trading_client, "get_all_positions", return_value=[
+            MagicMock(symbol="BAC261016P00062500", qty="1", qty_available="1")
+        ]), patch.object(options_trader.trading_client, "get_orders", return_value=[]), \
+                patch("options_trader.get_submitted_orders", return_value={}):
+            close_strategy_lot(
+                "regular", "BAC", "BAC261016P00062500", 1,
+                "underlying_trailing_stop_-3.00%",
+            )
 
         order = submit_order.call_args.args[0]
         self.assertEqual(float(order.limit_price), 3.10)

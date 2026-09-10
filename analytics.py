@@ -2,10 +2,12 @@ import csv
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from config import ANALYTICS_FILE
+from config import ANALYTICS_FILE, STRATEGY_ID, VIRTUAL_STARTING_CAPITAL
+from research import is_own_event, observe_event
 
 
 FIELDNAMES = [
+    "bot_strategy",
     "timestamp",
     "strategy",
     "event",
@@ -54,6 +56,8 @@ def record_event(
     order_side="",
     order_status="",
 ):
+    observe_event(event, strategy=strategy, underlying=underlying,
+                  option_symbol=option_symbol, reason=reason, details=details)
     path = Path(ANALYTICS_FILE)
     path.parent.mkdir(parents=True, exist_ok=True)
     _ensure_schema(path)
@@ -66,7 +70,8 @@ def record_event(
             writer.writeheader()
 
         writer.writerow({
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "bot_strategy": STRATEGY_ID,
+            "timestamp": datetime.now().astimezone().isoformat(timespec="seconds"),
             "strategy": strategy,
             "event": event,
             "underlying": underlying,
@@ -90,14 +95,14 @@ def read_events():
         return []
     _ensure_schema(path)
     with path.open("r", newline="") as file:
-        return list(csv.DictReader(file))
+        return [row for row in csv.DictReader(file) if is_own_event(row)]
 
 
 def latest_strategy_exit_date(strategy, underlying):
     latest = None
     for row in read_events():
         if (
-            row.get("event") == "ORDER_FILL"
+            row.get("event") in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}
             and row.get("order_side") == "sell"
             and row.get("strategy") == strategy
             and row.get("underlying") == underlying
@@ -143,9 +148,14 @@ def get_strategy_open_lots():
         if row.get("event") == "POSITION_MISSING":
             key = (row.get("strategy", ""), row.get("underlying", ""), row.get("option_symbol", ""))
             if key in lots:
-                lots[key].update(qty=0.0, cost=0.0, underlying_cost=0.0, opened_at="")
+                lots[key]["unresolved"] = True
             continue
-        if row.get("event") != "ORDER_FILL":
+        if row.get("event") == "POSITION_RECONCILED":
+            key = (row.get("strategy", ""), row.get("underlying", ""), row.get("option_symbol", ""))
+            if key in lots:
+                lots[key]["unresolved"] = False
+            continue
+        if row.get("event") not in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}:
             continue
         strategy = row.get("strategy", "")
         symbol = row.get("option_symbol", "")
@@ -187,10 +197,9 @@ def get_underlying_low_water_marks():
             continue
         key = (strategy, underlying, symbol)
         if row.get("event") == "POSITION_MISSING":
-            positions[key] = 0.0
-            low_water_marks.pop(key, None)
+            # A missing broker position is not evidence of a completed exit.
             continue
-        if row.get("event") == "ORDER_FILL":
+        if row.get("event") in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}:
             qty = float(row.get("qty") or 0)
             if row.get("order_side") == "buy":
                 if positions.get(key, 0) <= 0:
@@ -209,39 +218,34 @@ def get_underlying_low_water_marks():
 
 
 def get_submitted_orders():
-    """Return strategy orders that still need their fills reconciled."""
-    submitted = {}
-    filled = set()
+    """Keep reservations until confirmed terminal status, including partial fills."""
+    submitted, fills, filled_cost, terminal = {}, {}, {}, set()
     for row in read_events():
         order_id = row.get("order_id", "")
         if not order_id:
             continue
         if row.get("event") == "ORDER_SUBMITTED":
             submitted[order_id] = row
-        elif row.get("event") in {"ORDER_FILL", "ORDER_TERMINAL"}:
-            filled.add(order_id)
-    return {order_id: row for order_id, row in submitted.items() if order_id not in filled}
+        elif row.get("event") in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}:
+            qty = float(row.get("qty") or 0)
+            fills[order_id] = fills.get(order_id, 0) + qty
+            filled_cost[order_id] = filled_cost.get(order_id, 0) + qty * float(row.get("price") or 0)
+        elif row.get("event") == "ORDER_TERMINAL" and row.get("order_status") != "cancel_requested":
+            terminal.add(order_id)
+    pending = {}
+    for order_id, row in submitted.items():
+        quantity = float(row.get("qty") or 0)
+        filled = fills.get(order_id, 0)
+        if order_id not in terminal and filled < quantity:
+            pending[order_id] = dict(row, remaining_qty=quantity-filled,
+                                    recorded_fill_qty=filled,
+                                    recorded_fill_cost=filled_cost.get(order_id, 0))
+    return pending
 
 
 def get_owned_option_symbols():
-    """Return contracts that this bot has submitted buys for.
-
-    Ownership remains recorded after an exit so an account-level position in an
-    unrelated contract is never accidentally adopted by this bot.
-    """
-    path = Path(ANALYTICS_FILE)
-    if not path.exists():
-        return set()
-    _ensure_schema(path)
-
-    with path.open("r", newline="") as file:
-        return {
-            row.get("option_symbol", "")
-            for row in csv.DictReader(file)
-            if row.get("event") in {"BUY_SUBMITTED", "ORDER_SUBMITTED"}
-            and (row.get("order_side") or "buy") == "buy"
-            and row.get("option_symbol")
-        }
+    """Current confirmed local inventory, never historical account ownership."""
+    return {key[2] for key in get_strategy_open_lots()}
 
 
 def summarize_results():
@@ -255,10 +259,8 @@ def summarize_results():
             latest_prices[symbol] = float(row.get("price") or 0)
         if row.get("event") == "POSITION_MISSING":
             key = (row.get("strategy", ""), row.get("underlying", ""), symbol)
-            if key in inventory:
-                inventory[key].update(qty=0.0, cost=0.0)
             continue
-        if row.get("event") != "ORDER_FILL":
+        if row.get("event") not in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}:
             continue
         strategy = row.get("strategy", "")
         underlying = row.get("underlying", "")
@@ -302,7 +304,7 @@ def summarize_results():
 def summarize_performance_since(start_date, current_prices=None, strategy=None):
     """Return bot-only fill performance from a fixed date onward.
 
-    Return percentage uses gross buy premium deployed as its denominator. Fills
+    Allocation return uses the virtual starting portfolio as its denominator. Fills
     before the cutoff are deliberately excluded so earlier/shared-bot activity
     cannot leak into this bot's reported performance period.
     """
@@ -328,9 +330,8 @@ def summarize_performance_since(start_date, current_prices=None, strategy=None):
         symbol = row.get("option_symbol", "")
         key = (row.get("strategy", ""), row.get("underlying", ""), symbol)
         if row.get("event") == "POSITION_MISSING":
-            inventory.pop(key, None)
             continue
-        if row.get("event") != "ORDER_FILL" or not symbol:
+        if row.get("event") not in {"ORDER_FILL", "EXPIRATION_CONFIRMED"} or not symbol:
             continue
         if strategy is not None and row.get("strategy", "") != strategy:
             continue
@@ -365,7 +366,7 @@ def summarize_performance_since(start_date, current_prices=None, strategy=None):
 
     total_pnl = realized_pnl + unrealized_pnl
     return_pct = (
-        total_pnl / deployed_premium * 100 if deployed_premium > 0 else 0.0
+        total_pnl / VIRTUAL_STARTING_CAPITAL * 100
     )
     return {
         "start_date": cutoff.isoformat(),
@@ -374,6 +375,9 @@ def summarize_performance_since(start_date, current_prices=None, strategy=None):
         "unrealized_pnl": unrealized_pnl,
         "total_pnl": total_pnl,
         "return_pct": return_pct,
+        "starting_virtual_capital": VIRTUAL_STARTING_CAPITAL,
+        "ending_virtual_capital": VIRTUAL_STARTING_CAPITAL + total_pnl,
+        "return_on_capital_employed_percent": total_pnl / deployed_premium * 100 if deployed_premium else 0.0,
         "open_positions": open_positions,
         "positions_value": positions_value,
     }
@@ -404,10 +408,8 @@ def build_strategy_report(strategy_names=()):
             latest_prices[symbol] = float(row.get("price") or 0)
         if row.get("event") == "POSITION_MISSING":
             key = (row.get("strategy", ""), row.get("underlying", ""), symbol)
-            if key in inventory:
-                inventory[key].update(qty=0.0, cost=0.0)
             continue
-        if row.get("event") != "ORDER_FILL":
+        if row.get("event") not in {"ORDER_FILL", "EXPIRATION_CONFIRMED"}:
             continue
         strategy = row.get("strategy", "")
         if not strategy:
@@ -463,6 +465,13 @@ def build_strategy_report(strategy_names=()):
                 "realized_pnl": 0.0, "unrealized_pnl": 0.0,
                 "open_positions": [], "pending_orders": 0,
             })["pending_orders"] += 1
+    # Preserve the existing display while counting full round trips consistently.
+    from research import portfolio_report
+    for name, stats in report.items():
+        metrics = portfolio_report([row for row in events if row.get("strategy") in (name, "")])
+        stats.update(completed_trades=metrics["trade_count"], wins=metrics["winning_trades"],
+                     losses=metrics["losing_trades"], realized_pnl=metrics["realized_pnl"],
+                     unrealized_pnl=metrics["unrealized_pnl"])
     return report
 
 

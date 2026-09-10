@@ -12,7 +12,7 @@ BOT_PYTHON = str(VENV_PYTHON) if VENV_PYTHON.exists() else sys.executable
 while True:
     print("\nStarting options bot...")
 
-    result = subprocess.run([BOT_PYTHON, str(PROJECT_DIR / "main.py")])
+    result = subprocess.run([BOT_PYTHON, str(PROJECT_DIR / "main.py")], cwd=PROJECT_DIR)
 
     print(f"Options bot exited with return code: {result.returncode}")
 
@@ -20,7 +20,7 @@ while True:
         print("Options bot exited normally. Not restarting.")
         break
 
-    with open("crash.log", "a") as file:
+    with open(PROJECT_DIR / "crash.log", "a") as file:
         file.write(
             f"{datetime.now()} - Options bot crashed with return code {result.returncode}\n"
         )

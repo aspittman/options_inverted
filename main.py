@@ -1,4 +1,8 @@
 import time
+import fcntl
+from pathlib import Path
+from config import LOG_FILE
+from research import qualified_opportunity, update_opportunity, capital_snapshot
 
 from config import (
     UNDERLYINGS,
@@ -60,7 +64,7 @@ from options_trader import (
 )
 
 
-def run_bot():
+def _run_bot():
     setup_logging()
     configure_daily_data_client(stock_data_client)
     wait_for_market_open(trading_client)
@@ -142,136 +146,45 @@ def run_bot():
             if not market_regime_ok:
                 continue
 
-            if has_earnings_soon(underlying):
-                blocked += 1
-                continue
-
-            eligible_variants = []
             for variant in PAPER_STRATEGIES:
+                name = variant["name"]
                 state = get_bearish_signal_state(
-                    underlying,
-                    MA_SHORT,
-                    MA_LONG,
-                    MACD_FAST,
-                    MACD_SLOW,
-                    MACD_SIGNAL,
-                    signal=variant["signal"],
-                )
-                if not state.get("data_available", True):
-                    record_event(
-                        "SKIP", strategy=variant["name"], underlying=underlying,
-                        reason="signal_data_unavailable"
-                    )
-                elif not state["bearish"]:
-                    record_event(
-                        "SKIP", strategy=variant["name"], underlying=underlying,
-                        reason=f"not_bearish_{variant['signal']}"
-                    )
-                elif not state["new_signal"]:
-                    record_event(
-                        "SKIP", strategy=variant["name"], underlying=underlying,
-                        reason="signal_not_new", details=f"signal_date={state['signal_date']}"
-                    )
-                elif signal_bar_already_submitted(
-                    variant["name"], underlying, state["signal_date"]
-                ):
-                    record_event(
-                        "SKIP", strategy=variant["name"], underlying=underlying,
-                        reason="signal_bar_already_traded",
-                        details=f"signal_date={state['signal_date']}"
-                    )
-                elif cooldown_active(
-                    variant["name"], underlying, REENTRY_COOLDOWN_DAYS
-                ):
-                    record_event(
-                        "SKIP", strategy=variant["name"], underlying=underlying,
-                        reason="reentry_cooldown",
-                        details=f"cooldown_trading_days={REENTRY_COOLDOWN_DAYS}"
-                    )
-                else:
-                    eligible_variants.append((variant, state["signal_date"]))
-
-            new_signals += len(eligible_variants)
-
-            if not eligible_variants:
-                bot_log(f"No daily bearish setup for {underlying}.")
-                continue
-
-            option_symbol = get_option_contract(
-                underlying,
-                option_type=OPTION_TYPE,
-                min_dte=MIN_DTE,
-                max_dte=MAX_DTE
-            )
-
-            if option_symbol:
-                lots = get_strategy_open_lots()
-                pending = get_submitted_orders().values()
-                reserved_count = len(lots) + sum(
-                    1 for row in pending if row.get("order_side") == "buy"
-                )
-                reserved_group_counts = {}
-                for _, lot_underlying, _ in lots:
-                    group = correlation_group(lot_underlying)
-                    reserved_group_counts[group] = reserved_group_counts.get(group, 0) + 1
-                for row in pending:
-                    if row.get("order_side") == "buy":
-                        group = correlation_group(row.get("underlying", ""))
-                        reserved_group_counts[group] = reserved_group_counts.get(group, 0) + 1
-                for variant, signal_date in eligible_variants:
-                    strategy_name = variant["name"]
-                    if reserved_count >= MAX_POSITIONS:
-                        bot_log(
-                            f"Global position limit reached: strategy={strategy_name} "
-                            f"MAX_POSITIONS={MAX_POSITIONS}"
-                        )
-                        record_event(
-                            "SKIP", strategy=strategy_name, underlying=underlying,
-                            reason="max_positions"
-                        )
+                    underlying, MA_SHORT, MA_LONG, MACD_FAST, MACD_SLOW,
+                    MACD_SIGNAL, signal=variant["signal"])
+                if not state.get("data_available", True) or not state["bearish"] or not state["new_signal"]:
+                    continue
+                # Only genuine fresh signals enter the research opportunity log.
+                # Guards are applied afterward, so their rejections remain data.
+                new_signals += 1
+                with qualified_opportunity(name, underlying, state["signal_date"],
+                                           "bearish" if ENABLE_MARKET_REGIME_FILTER else "filter_disabled"):
+                    update_opportunity(virtual_capital_available=capital_snapshot()["available"])
+                    record_event("SIGNAL_QUALIFIED", strategy=name, underlying=underlying,
+                                 details=f"signal_date={state['signal_date']};market_regime=bearish")
+                    if signal_bar_already_submitted(name, underlying, state["signal_date"]):
+                        record_event("SKIP", strategy=name, underlying=underlying,
+                                     reason="signal_bar_already_traded")
                         blocked += 1
                         continue
-                    target_group = correlation_group(underlying)
-                    if reserved_group_counts.get(target_group, 0) >= MAX_POSITIONS_PER_CORRELATION_GROUP:
-                        bot_log(
-                            f"Correlation-group limit reached: group={target_group} "
-                            f"underlying={underlying}"
-                        )
-                        record_event(
-                            "SKIP", strategy=strategy_name, underlying=underlying,
-                            reason=f"correlation_group_{target_group}"
-                        )
+                    if cooldown_active(name, underlying, REENTRY_COOLDOWN_DAYS):
+                        record_event("SKIP", strategy=name, underlying=underlying,
+                                     reason="reentry_cooldown")
                         blocked += 1
                         continue
-                    already_holds = any(
-                        strategy == strategy_name and lot_underlying == underlying
-                        for strategy, lot_underlying, _ in lots
-                    )
-                    if already_holds:
-                        record_event(
-                            "SKIP", strategy=strategy_name, underlying=underlying,
-                            reason="already_holding"
-                        )
+                    if has_earnings_soon(underlying):
+                        # The earnings helper already records the detailed skip.
                         blocked += 1
                         continue
-                    submitted = buy_option_contract(
-                        option_symbol,
-                        qty=CONTRACT_QTY,
-                        underlying=underlying,
-                        strategy=strategy_name,
-                        max_entry_premium=variant["max_premium"],
-                        signal_date=signal_date,
-                    )
-                    if submitted:
-                        orders_submitted += 1
-                        reserved_count += 1
-                        reserved_group_counts[target_group] = (
-                            reserved_group_counts.get(target_group, 0) + 1
-                        )
-                    else:
+                    option_symbol = get_option_contract(underlying, option_type=OPTION_TYPE,
+                                                        min_dte=MIN_DTE, max_dte=MAX_DTE)
+                    if not option_symbol:
                         blocked += 1
-            else:
-                blocked += len(eligible_variants)
+                        continue
+                    submitted = buy_option_contract(option_symbol, qty=CONTRACT_QTY,
+                        underlying=underlying, strategy=name,
+                        max_entry_premium=variant["max_premium"], signal_date=state["signal_date"])
+                    if submitted: orders_submitted += 1
+                    else: blocked += 1
 
             time.sleep(2)
 
@@ -281,6 +194,18 @@ def run_bot():
             f"orders submitted={orders_submitted}"
         )
         time.sleep(SCAN_INTERVAL_SECONDS)
+
+
+def run_bot():
+    # A local process lock prevents two instances spending the same reservations.
+    lock_path = Path(LOG_FILE).parent / "long_put.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RuntimeError("Another LongPutBot instance is already running")
+        _run_bot()
 
 
 if __name__ == "__main__":

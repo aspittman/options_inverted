@@ -6,6 +6,7 @@ is available near the requested entry or exit.
 """
 
 from datetime import datetime, time, timedelta, timezone
+import math
 
 from alpaca.data.historical import OptionHistoricalDataClient
 from alpaca.data.requests import OptionBarsRequest
@@ -14,7 +15,7 @@ from alpaca.trading.client import TradingClient
 from alpaca.trading.enums import AssetStatus, ContractType
 from alpaca.trading.requests import GetOptionContractsRequest
 
-from config import API_KEY, SECRET_KEY, ALPACA_PAPER, MAX_DTE, MIN_DTE
+from config import API_KEY, SECRET_KEY, ALPACA_PAPER, MAX_DTE, MIN_DTE, MAX_OPTION_PREMIUM_PER_TRADE
 
 
 def _utc_start(iso_date):
@@ -70,10 +71,13 @@ class AlpacaOptionRepricer:
         )
         return response.data
 
-    def reprice(self, candidate, max_entry_premium=100.0):
+    def reprice(self, candidate, max_entry_premium=MAX_OPTION_PREMIUM_PER_TRADE):
+        self.last_rejection = None
         underlying = candidate["symbol"]
         entry_underlying = float(candidate["entry_underlying_price"])
-        target_strike = entry_underlying * 1.01
+        from backtester import estimate_strike_for_delta
+        from config import TARGET_DELTA, BACKTEST_ENTRY_DTE
+        target_strike = estimate_strike_for_delta(entry_underlying, TARGET_DELTA, BACKTEST_ENTRY_DTE)
         contracts = self._contracts(
             underlying, candidate["entry_date"], target_strike
         )
@@ -86,37 +90,43 @@ class AlpacaOptionRepricer:
             )
         )
 
+        # Rank first, independently of price. Never replace a preferred contract
+        # with an inferior affordable strike. Historical delta is an estimate;
+        # daily bars do not contain historical quotes, Greeks or open interest.
+        if not contracts:
+            self.last_rejection = dict(candidate, rejection_reason="NO_VALID_CONTRACT",
+                                       details="no_historical_contract")
+            return None
+        contract = contracts[0]
         entry_start = _utc_start(candidate["entry_date"])
-        entry_bars = self._bars(
-            [item.symbol for item in contracts],
-            entry_start,
-            entry_start + timedelta(days=2),
-        )
-        eligible = []
-        for contract in contracts:
-            bars = entry_bars.get(contract.symbol, [])
-            if not bars:
-                continue
-            entry_price = float(bars[0].close)
-            if 0 < entry_price * 100 <= max_entry_premium:
-                eligible.append((contract, entry_price))
-        if not eligible:
+        history = self._bars([contract.symbol], entry_start,
+            _utc_start(candidate["exit_date"])+timedelta(days=1)).get(contract.symbol, [])
+        entry_bars = [bar for bar in history if bar.timestamp.date() == entry_start.date()]
+        exit_day = _utc_start(candidate["exit_date"]).date()
+        exit_bars = [bar for bar in history if bar.timestamp.date() == exit_day]
+        if not entry_bars or not exit_bars:
+            self.last_rejection = dict(candidate, option_symbol=contract.symbol,
+                rejection_reason="OTHER", details="missing_exact_entry_or_exit_bar")
             return None
-
-        contract, entry_price = eligible[0]
-        exit_end = _utc_start(candidate["exit_date"]) + timedelta(days=2)
-        history = self._bars([contract.symbol], entry_start, exit_end).get(
-            contract.symbol, []
-        )
-        if not history:
+        entry_price, exit_price = float(entry_bars[0].close), float(exit_bars[-1].close)
+        if not math.isfinite(entry_price) or not math.isfinite(exit_price) or entry_price <= 0 or exit_price < 0:
+            self.last_rejection = dict(candidate, option_symbol=contract.symbol,
+                rejection_reason="OTHER", details="invalid_historical_bar_price")
             return None
-        exit_cutoff = _utc_start(candidate["exit_date"]) + timedelta(days=1)
-        exit_bars = [bar for bar in history if bar.timestamp < exit_cutoff]
-        if not exit_bars:
+        if max_entry_premium is not None and entry_price*100 > max_entry_premium:
+            self.last_rejection = dict(candidate, option_symbol=contract.symbol,
+                rejection_reason="PREMIUM_OVER_LIMIT", required_capital=entry_price*100,
+                details="preferred_contract_over_limit;no_substitution")
             return None
-        exit_price = float(exit_bars[-1].close)
         pnl = (exit_price - entry_price) * 100
         return {
+            **candidate,
+            "capital_employed": entry_price * 100,
+            "entry_dte": (contract.expiration_date-entry_start.date()).days,
+            "exit_dte": (contract.expiration_date-exit_day).days,
+            "estimated_strike": float(contract.strike_price),
+            "estimated_entry_delta": "", "estimated_exit_delta": "",
+            "contracts": 1,
             "symbol": underlying,
             "option_symbol": contract.symbol,
             "entry_date": candidate["entry_date"],
@@ -129,7 +139,7 @@ class AlpacaOptionRepricer:
         }
 
 
-def reprice_candidates(candidates, max_entry_premium=100.0, max_candidates=None):
+def reprice_candidates(candidates, max_entry_premium=MAX_OPTION_PREMIUM_PER_TRADE, max_candidates=None, rejected=None):
     repricer = AlpacaOptionRepricer()
     selected = candidates[-max_candidates:] if max_candidates else candidates
     trades = []
@@ -141,4 +151,6 @@ def reprice_candidates(candidates, max_entry_premium=100.0, max_candidates=None)
         trade = repricer.reprice(candidate, max_entry_premium=max_entry_premium)
         if trade:
             trades.append(trade)
+        elif rejected is not None and repricer.last_rejection:
+            rejected.append(repricer.last_rejection)
     return trades

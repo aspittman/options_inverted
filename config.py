@@ -1,4 +1,6 @@
 import os
+import math
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -100,12 +102,39 @@ def _env_float(name, default):
     return float(os.getenv(name, str(default)))
 
 
+# One research allocation shared by both long-put signal variants. Broker account
+# equity/buying power never increases these limits.
+STRATEGY_ID = "long_put"
+VIRTUAL_STARTING_CAPITAL = _env_float("VIRTUAL_STARTING_CAPITAL", 25000.0)
+MAX_OPTION_PREMIUM_PER_TRADE = _env_float("MAX_OPTION_PREMIUM_PER_TRADE", 500.0)
+MAX_CONTRACTS_PER_TRADE = _env_int("MAX_CONTRACTS_PER_TRADE", 1)
+if not math.isfinite(VIRTUAL_STARTING_CAPITAL) or VIRTUAL_STARTING_CAPITAL <= 0:
+    raise ValueError("VIRTUAL_STARTING_CAPITAL must be positive and finite")
+if not 0 < MAX_OPTION_PREMIUM_PER_TRADE <= 500:
+    raise ValueError("Paper/live premium cap must be in (0, 500]; use backtest CLI for larger experiments")
+if MAX_CONTRACTS_PER_TRADE != 1:
+    raise ValueError("LongPutBot research requires exactly one contract per trade")
+
 MAX_POSITIONS = _env_int("MAX_POSITIONS", 2)
 ENABLE_NEW_ENTRIES = _env_bool("ENABLE_NEW_ENTRIES", False)
-MAX_PREMIUM_PER_TRADE = _env_float("MAX_PREMIUM_PER_TRADE", 500.0)
+# Legacy settings may tighten, but never bypass, the canonical premium ceiling.
+MAX_PREMIUM_PER_TRADE = min(
+    _env_float("MAX_PREMIUM_PER_TRADE", MAX_OPTION_PREMIUM_PER_TRADE),
+    MAX_OPTION_PREMIUM_PER_TRADE,
+)
 MAX_TOTAL_OPTION_PREMIUM = _env_float("MAX_TOTAL_OPTION_PREMIUM", 1000.0)
-REGULAR_MAX_PREMIUM_PER_TRADE = _env_float("REGULAR_MAX_PREMIUM_PER_TRADE", 500.0)
-MAX_100_PREMIUM_PER_TRADE = _env_float("MAX_100_PREMIUM_PER_TRADE", 500.0)
+REGULAR_MAX_PREMIUM_PER_TRADE = min(
+    _env_float("REGULAR_MAX_PREMIUM_PER_TRADE", MAX_PREMIUM_PER_TRADE),
+    MAX_PREMIUM_PER_TRADE,
+)
+MAX_100_PREMIUM_PER_TRADE = min(
+    _env_float("MAX_100_PREMIUM_PER_TRADE", MAX_PREMIUM_PER_TRADE),
+    MAX_PREMIUM_PER_TRADE,
+)
+for _name in ("MAX_PREMIUM_PER_TRADE", "MAX_TOTAL_OPTION_PREMIUM",
+              "REGULAR_MAX_PREMIUM_PER_TRADE", "MAX_100_PREMIUM_PER_TRADE"):
+    if not math.isfinite(globals()[_name]) or globals()[_name] <= 0:
+        raise ValueError(f"{_name} must be positive and finite")
 UNDERLYING_TRAILING_STOP_PERCENT = _env_float(
     "UNDERLYING_TRAILING_STOP_PERCENT", 0.03
 )
@@ -113,7 +142,7 @@ PAPER_STRATEGIES = (
     {
         "name": "regular",
         "signal": "daily_trend",
-        "max_premium": REGULAR_MAX_PREMIUM_PER_TRADE or None,
+        "max_premium": REGULAR_MAX_PREMIUM_PER_TRADE,
         "underlying_trailing_stop": UNDERLYING_TRAILING_STOP_PERCENT,
         "underlying_take_profit": 0.08,
         "max_holding_days": 20,
@@ -179,7 +208,7 @@ UNDERLYING_TAKE_PROFIT_PCT = 0.08
 
 BACKTEST_ENTRY_DTE = 75
 BACKTEST_OPTION_TIME_VALUE_PERCENT = 0.12
-BACKTEST_STARTING_CASH = _env_float("BACKTEST_STARTING_CASH", 2500.0)
+BACKTEST_STARTING_CASH = VIRTUAL_STARTING_CAPITAL  # compatibility alias; CLI can override
 OPTION_STOP_LOSS_PERCENT = _env_float("OPTION_STOP_LOSS_PERCENT", 0.30)
 OPTION_TRAILING_STOP_PERCENT = _env_float("OPTION_TRAILING_STOP_PERCENT", 0.0)
 OPTION_TAKE_PROFIT_PERCENT = 1.00
@@ -190,9 +219,14 @@ LIMIT_ORDER_TIMEOUT_MINUTES = _env_int("LIMIT_ORDER_TIMEOUT_MINUTES", 15)
 EXIT_LIMIT_TIMEOUT_MINUTES = _env_int("EXIT_LIMIT_TIMEOUT_MINUTES", 2)
 
 OPTION_TYPE = "put"  # buy puts to open; sell owned puts to close
-CONTRACT_QTY = 1
+CONTRACT_QTY = MAX_CONTRACTS_PER_TRADE
 
 SCAN_INTERVAL_SECONDS = 300
 
-LOG_FILE = "logs/options_bot.log"
-ANALYTICS_FILE = "logs/trade_analytics.csv"
+# Keep real-money research records separate if live mode is explicitly selected.
+PROJECT_DIR = Path(__file__).resolve().parent
+_LOG_DIR = PROJECT_DIR / ("logs" if ALPACA_PAPER else "logs/live")
+LOG_FILE = f"{_LOG_DIR}/options_bot.log"
+ANALYTICS_FILE = f"{_LOG_DIR}/trade_analytics.csv"
+REJECTED_TRADES_FILE = f"{_LOG_DIR}/rejected_trades.csv"
+RESEARCH_REPORT_FILE = f"{_LOG_DIR}/long_put_research.json"

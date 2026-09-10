@@ -1,7 +1,7 @@
 import logging
 from pathlib import Path
 
-from config import LOG_FILE
+from config import LOG_FILE, STRATEGY_ID
 
 
 def setup_logging():
@@ -19,4 +19,4 @@ def setup_logging():
 
 
 def bot_log(message, level=logging.INFO):
-    logging.getLogger("options_bot").log(level, message)
+    logging.getLogger(STRATEGY_ID).log(level, message)

@@ -1,180 +1,243 @@
-# OptionsInverted
+# OptionsInverted / LongPutBot
 
 Long-put adaptation of [OptionsDirect](https://github.com/aspittman/options_direct),
 based on commit `66737da21b00b51b25d93cca30388030d76f3a51`.
+The bot buys puts on bearish setups and sells only owned long puts to close.
+The strategy identifier is `long_put`; `regular` and `max_100` remain signal
+variant names, not separate funded portfolios.
 
-Buys puts in bearish markets and sells owned contracts to close. The SPY regime
-requires price and its 50-day average below its 200-day average. Contracts target
-**-0.60 delta ±0.10**, with the reference liquidity filters and 60–90 DTE window.
-Underlying profit targets are declines of 8% (regular) or 6% (swing). A 3% rebound
-from the lowest observed underlying price triggers the trailing stop. Technical
-exits trigger on bullish reversals. Option premium P/L retains the normal long
-position direction: rising put premiums produce gains.
+## Capital and risk
 
-The bearish rules are an initial adaptation, not empirically optimized parameters
-or demonstrated profitable settings. No historical performance is claimed.
-The inherited backtests are approximations: they enter on signal-bar closes and
-do not fully reproduce the live regime filter, fresh-signal/cooldown gating, or
-all execution and exit rules. Historical repricing does not enforce historical
-delta or liquidity filters and can use nearby available bars. Validate those
-limitations before interpreting results as expected live returns.
-
-This project uses its own local analytics ledger and `oi-` order tags. Do not copy
-the call bot's logs into this project. Paper trading is the default and new entries
-are disabled until explicitly enabled in your configuration.
-
-## Setup
-
-```bash
-cd /path/to/options_inverted
-
-python3 -m venv venv
-source venv/bin/activate
-
-pip install -r requirements.txt
-cp .env.example .env
-```
-
-Edit `.env` with your Alpaca paper trading credentials:
-
-```bash
-APCA_API_KEY_ID=your_alpaca_api_key
-APCA_API_SECRET_KEY=your_alpaca_secret_key
+```dotenv
 ALPACA_PAPER=true
-```
-
-The bot also accepts `ALPACA_API_KEY`/`ALPACA_SECRET_KEY` or the older
-`API_KEY`/`SECRET_KEY` names, but Alpaca's `APCA_*` names are preferred.
-
-Run the bot:
-
-```bash
-python main.py
-```
-
-Optional option-risk settings (shown with defaults):
-
-```bash
-ENABLE_NEW_ENTRIES=false
-EXIT_DTE=30
-OPTION_STOP_LOSS_PERCENT=0.30
-OPTION_TRAILING_STOP_PERCENT=0
-UNDERLYING_TRAILING_STOP_PERCENT=0.03
-REENTRY_COOLDOWN_DAYS=5
-LIMIT_ORDER_TIMEOUT_MINUTES=15
-EXIT_LIMIT_TIMEOUT_MINUTES=2
-MAX_PREMIUM_PER_TRADE=500
-REGULAR_MAX_PREMIUM_PER_TRADE=500
-MAX_100_PREMIUM_PER_TRADE=500
+VIRTUAL_STARTING_CAPITAL=25000
+MAX_OPTION_PREMIUM_PER_TRADE=500
+MAX_CONTRACTS_PER_TRADE=1
 MAX_TOTAL_OPTION_PREMIUM=1000
 MAX_POSITIONS=2
 MAX_POSITIONS_PER_CORRELATION_GROUP=1
-BACKTEST_STARTING_CASH=2500
-ALLOW_DUPLICATE_CONTRACTS=false
-ALLOW_MULTIPLE_CONTRACTS_PER_UNDERLYING=false
 ```
 
-When `ENABLE_NEW_ENTRIES=false`, the bot continues reconciling fills and managing
-all existing exits, but it submits no new buy orders. Set it to `true` only when
-you intentionally resume paper entries. `MAX_POSITIONS=2` is enforced globally
-across both named strategies, and the total-premium limit is also shared.
+Both variants share one virtual $25,000 allocation. Broker equity, cash and buying
+power are displayed only as account context and never increase this allocation or
+the permitted trade size. Capital employed is entry option premium × quantity ×
+100. Available virtual cash is starting allocation plus confirmed realized P/L,
+less open premium and pending-buy reservations. Exposure cannot exceed either
+the starting allocation or the existing total-premium risk limit.
 
-Percent settings are decimal fractions. Position limits and premium totals apply
-only to option contracts submitted by OptionsInverted; stock positions and other
-bots' positions are excluded. The analytics CSV records realized and unrealized
-P/L in separate columns and the cycle log reports results both by contract and
-by underlying.
+**The existing $1,000 combined premium and two-position limits remain active.**
+The $25,000 allocation does not authorize $25,000 of simultaneous option exposure.
+Profits do not raise the $500 entry ceiling or the fixed exposure ceilings.
+Pending cancellations retain their reservation until the broker confirms terminal
+status; partial fills reserve only the unfilled remainder in addition to owned cost.
 
-The live paper bot runs two named daily variants in the same Alpaca paper account.
-Both use completed daily candles and 60–90 DTE puts, so the live and historical
-indicator periods now represent the same timeframe:
+A $3.40 quote costs $340 for one contract and fits. A $6.25 quote costs $625 and is
+rejected. The final check uses the actual cent-rounded midpoint limit: a $5.005
+midpoint becomes $5.01, or $501, and is rejected. Contract selection still uses DTE,
+delta/moneyness, liquidity and spread quality before capital is considered. An
+expensive preferred contract is never replaced with a cheap inferior strike.
 
-- `regular` is the daily trend control: price below falling 50/200-day averages
-  with negative MACD confirmation. It holds for at most 20 trading days.
-- `max_100` is the daily rally-rejection swing candidate: bearish 50/200-day regime,
-  20-day EMA rejection, 10-day EMA confirmation, RSI 35–55, and negative MACD
-  histogram. It uses a 3% underlying stop, 6% target, and 15-day maximum hold.
+`MAX_PREMIUM_PER_TRADE`, `REGULAR_MAX_PREMIUM_PER_TRADE`, and
+`MAX_100_PREMIUM_PER_TRADE` remain compatibility settings. They can tighten the
+canonical premium limit, never raise or disable it. Nonpositive limits fail
+configuration validation. Paper/live configuration rejects premium ceilings over
+$500 and contract counts other than one; use the historical CLI for larger premium
+experiments. `BACKTEST_STARTING_CASH` is now a code compatibility alias for
+`VIRTUAL_STARTING_CAPITAL`; its old environment setting no longer overrides the
+allocation.
 
-Entries require a fresh false-to-true signal on a newly completed daily candle,
-and an underlying cannot be re-entered by the same strategy for five trading days
-after an exit. Entries use midpoint day-limit prices and are canceled if they
-remain unfilled for 15 minutes. Risk exits use marketable limits at the current
-bid and are repriced after two minutes if necessary.
+## Strategy rules
 
-Live daily candles come from Alpaca's IEX stock feed. Entry signals are evaluated
-once for each newly completed daily candle; the five-minute runtime loop continues
-to reconcile orders and monitor exits. Each loop ends with a concise cycle summary.
+Signals use completed daily bars. The SPY regime requires price and its 50-day
+average below its 200-day average. The two unchanged entry variants are:
 
-Both variants cap entry premium at $500. Across the two variants, at most two
-positions and $1,000 of entry premium may be open. All contracts are closed by 30
-DTE, and the 30% option stop is catastrophe protection in addition to the
-underlying and technical exits. The option trailing stop is disabled by default;
-underlying and completed-daily technical signals drive normal exits. The stock
-stop trails 3% above the lowest underlying price observed after entry, never
-moves upward, and is rebuilt from the analytics ledger after a restart.
-Only one open or pending position is allowed from each configured correlation
-group (broad indexes, technology, financials, energy, healthcare, and
-consumer/industrial), preventing both slots from expressing essentially the same
-sector bet.
+- `regular`: price below the falling 50-day average and below the 200-day average,
+  with bearish MACD confirmation; 8% underlying-decline target and 20-trading-day hold.
+- `max_100`: bearish 50/200-day regime, rejection back below the 20-day EMA after
+  trading above it, 10-day EMA confirmation, RSI 35–55 and negative MACD histogram;
+  6% underlying-decline target and 15-trading-day hold. Its historical name does not
+  mean the premium cap is $100.
 
-Both variants submit separately tagged paper orders. Alpaca combines quantities
-when both variants own the same contract, while `logs/trade_analytics.csv` keeps
-the confirmed fill price and virtual quantity for each variant. Runtime summaries
-include `by_strategy` realized and unrealized P/L based on those paper fills.
-Changing `MAX_PREMIUM_PER_TRADE` is retained for compatibility with older setups;
-the two live variants use the two strategy-specific settings above.
+Both require a fresh false-to-true signal. Five-weekday reentry cooldowns,
+earnings guards, correlation limits, and duplicate restrictions remain in place.
+Contracts use 60–90 DTE, target delta −0.60 ±0.10, open interest above 500,
+volume above 100, and bid/ask spread below 5% of midpoint. Liquidity and spread
+requirements have not been loosened.
 
-Run the options backtester:
+A 3% underlying rebound from the lowest observed price triggers the trailing
+stop. Other exits include bullish technical reversals, a 30% option-premium stop,
+maximum hold, and closing at/before the configured 30-DTE threshold when execution
+is available. The optional option-premium trailing stop defaults to disabled.
+Entries use midpoint day limits; exits use marketable bid limits. Unfilled entry
+orders are canceled after 15 minutes; exit limits after two minutes and retried
+after cancellation confirmation. Stops are monitored, not guaranteed fills.
+
+## Shared paper account and ownership
+
+The local fill ledger identifies owned long-put quantities. Account-level stock,
+call and short-put positions are ignored. Historical ownership of a symbol does
+not allow adoption of a later account position. Automatic legacy adoption has
+been disabled. Position displays and exits use the bot's owned quantity and cost
+basis, not another strategy's quantity in a net broker position.
+
+Orders use `long_put_<underlying>_<unique-id>` client IDs and explicit
+`buy_to_open` / `sell_to_close` intents. Logs include `long_put`; the CSV adds
+`bot_strategy` while retaining the variant in `strategy`. Existing local
+`regular`/`max_100` put rows and tracked `oi-` orders remain readable. Explicit
+foreign strategy identifiers are excluded.
+
+New orders are blocked if the same contract already exists in the account or has
+an open account order. Exits require owned long-put quantity and sufficient broker
+long quantity, and will not cancel another bot's orders. The account nets identical
+contracts: identifiers cannot prevent another independent bot from concurrently
+submitting an opposing order after this bot's check. All bots must honor ownership
+and same-contract conflict checks for reliable separation.
+
+Missing or reduced broker inventory is flagged as unresolved. Its entry capital
+stays reserved and new entries pause until an owned exit is confirmed or quantity
+is reconciled. Missing positions are never automatically classified as worthless
+expirations. Do not copy another bot's ledger into this folder.
+
+A local process lock prevents two copies of this bot from spending the same local
+allocation. Paper outputs use this project's `logs/`; explicitly configured live
+mode uses `logs/live/`. Paths are anchored to this project, including when launched
+from another working directory. No live or paper process is started by setup.
+
+## Setup and run
 
 ```bash
-python backtester.py --years 1
-python backtester.py --years 3
-python backtester.py --years 5
-python backtester.py --years 5 --compare-signals
-python backtester.py --years 2 --alpaca-options swing --max-candidates 100
+cd /path/to/options_inverted
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+# Only if you do not already have a configured .env:
+cp .env.example .env
 ```
 
-`--compare-signals` compares the existing MA/MACD rules with an experimental
-daily rally rejection swing setup using $100 of bearish underlying exposure per trade. This
-isolates entry/exit quality from synthetic option pricing; it is not an option
-return simulation and does not authorize changing the live strategy by itself.
+Set paper credentials with `APCA_API_KEY_ID` and `APCA_API_SECRET_KEY` in `.env`.
+`ALPACA_API_KEY`/`ALPACA_SECRET_KEY` and `API_KEY`/`SECRET_KEY` are also accepted.
+Keep `ALPACA_PAPER=true`. Set `ENABLE_NEW_ENTRIES=true` to enable paper entries;
+the default example disables entries while allowing exits to be managed.
 
-`--alpaca-options` uses actual Alpaca daily option bars and expired contract
-metadata instead of theoretical option prices. Alpaca option history begins in
-February 2024. Candidates without a real entry/exit bar or a qualifying contract
-under the premium ceiling are skipped; the command never fabricates a fill.
+```bash
+python3 main.py
+# Optional restart supervisor:
+python3 launcher.py
+```
 
-Each standard run prints two summaries: the daily trend control and the daily
-swing variant, both subject to their configured premium limits. The trend results
-are written to `logs/options_backtest_trades.csv` and
-`logs/options_backtest_equity_curve.csv`; the daily-swing results are written to
-`logs/options_backtest_trades_100_max.csv` and
-`logs/options_backtest_equity_curve_100_max.csv`. Each summary includes win rate,
-total P/L, profit factor, expectancy, maximum drawdown, and symbol-level results.
-Historical backtests remain separate from live paper analytics: they provide many
-years of fast, estimated testing, while the live analytics file measures the
-actual fills returned by Alpaca paper trading from this point forward.
-Both historical variants now enforce starting cash, the configured maximum of two
-concurrent positions, the shared total-premium ceiling, and their per-trade premium
-limits. Option prices remain estimates rather than historical option-chain quotes.
+Only run one of these commands. Restart an already running bot to load code or
+configuration changes. The bot waits for market hours and can legitimately place
+no trades when bearish signals or contract-quality filters do not qualify.
 
-View both live paper strategies without placing orders or running a historical
-simulation:
+## Rejected opportunities
+
+`logs/rejected_trades.csv` records fresh market/signal-qualified opportunities
+blocked by a later guard. Non-bearish scans and continuing signals are not counted
+as qualified opportunities. The existing ledger also records `SIGNAL_QUALIFIED`.
+
+Fields include timestamp, strategy, variant, underlying, contract, direction,
+strike, expiration, DTE, underlying price, bid/ask/mid, dollar and percentage spread,
+option premium, required capital, virtual cash available, rejection reason,
+signal date, signal score and market regime. Unavailable fields are blank; the
+boolean signal system has no numeric score. Percentages in this research CSV
+are percentage points, e.g. `4` means 4%; configuration fractions use `0.04`.
+
+Reasons include `PREMIUM_OVER_LIMIT`, `INSUFFICIENT_LIQUIDITY`, `SPREAD_TOO_WIDE`,
+`MAX_CONTRACTS_REACHED`, `MAX_STRATEGY_EXPOSURE_REACHED`, `DUPLICATE_POSITION`,
+`NO_VALID_CONTRACT`, and `OTHER` with explanatory details. Multiple failed quality
+filters may produce `NO_VALID_CONTRACT`. Capital checks report the first blocker;
+`PREMIUM_OVER_LIMIT` means other evaluated guards passed. Broker rejections are
+recorded separately when reconciled. Rejected opportunities never become fills or
+completed trades. A restart can re-evaluate an unfilled signal, so repeated research
+observations may be grouped by variant, underlying and signal date when analyzing.
+
+## Performance
 
 ```bash
 python3 backtester.py --paper-results
 ```
 
-This reports confirmed completed trades, win rate, realized and unrealized P/L,
-open virtual positions, and pending orders separately for `regular` and
-`max_100`.
+This reads the local ledger without contacting Alpaca or placing orders and writes
+`logs/long_put_research.json`. The running bot refreshes the same report each cycle.
+The report includes:
+
+- Starting/ending virtual capital, realized/unrealized P/L, total return, exposure,
+  pending reservations and available virtual cash.
+- Return on capital employed, average entry capital, peak concurrent entry capital,
+  completed round-trip count, entry count, win rate, average/largest winner and loser,
+  expectancy, profit factor, maximum drawdown and average holding days.
+- Premium paid, premium lost on net losing completed trades, option return,
+  average entry premium, average entry DTE and available spread observations.
+- Explicitly confirmed worthless expirations, unresolved positions and rejection counts.
+
+Allocation return = total P/L ÷ starting virtual capital. Return on capital employed
+and option return = total P/L ÷ cumulative entry premium. These denominators differ
+intentionally. Repeatedly deployed capital counts each entry for ROC; peak capital
+employed measures concurrent cost. Partial exits count as one trade when a round
+trip finishes. Premium paid includes open trades; trade outcome statistics use
+completed trades. No-loss profit factor is null with a status rather than a fabricated
+finite value. Missing averages are null.
+
+Unrealized P/L uses the latest recorded marks, with entry-cost fallback for unmarked
+positions, and is provisional if marks are stale or positions unresolved. Drawdown
+uses sampled ledger marks and fills, not continuous tick data. Worthless expiration
+counts require an explicit `EXPIRATION_CONFIRMED` event backed by broker evidence;
+this bot does not infer that event from absence and normally seeks to exit by 30 DTE.
+Premium-selling metrics such as collateral yield and assignment rate are not
+applicable to this long-put strategy.
+
+## Historical capital comparisons
+
+```bash
+python3 backtester.py --years 1
+python3 backtester.py --years 3 --premium-limits 250 500 750 1000
+python3 backtester.py --years 5 --premium-limits 500 --virtual-capital 25000
+python3 backtester.py --period 2y --alpaca-options swing --max-candidates 100 --premium-limits 250 500 750 1000
+```
+
+Standard runs generate fresh bearish opportunities for both variants, then apply
+one shared cash/exposure ledger, duplicate/group limits and reentry cooldowns.
+Candidates are identical across premium configurations; rejected trades cannot
+suppress later fresh signals. Capital employed is entry premium × 100 in both live
+paper and historical accounting. The explicit premium comparison overrides legacy
+per-variant premium settings only; the existing combined exposure and position
+limits still apply. Daily strategies require `--interval 1d`.
+
+Each configuration writes `logs/backtest_long_put_<cap>_summary.json`, `_trades.csv`,
+`_equity.csv`, and `_rejected.csv`. Summaries show qualified signals, executed trades,
+rejections by reason, and the same portfolio statistics/denominators used for paper.
+Historical equity starts at the virtual allocation. The Alpaca repricing mode uses
+`logs/alpaca_long_put_<variant>_<cap>_*` and limits counts to the queried candidate
+subset. Historical output is separate from paper fill and rejection ledgers.
+
+These are research estimates, not validated expected returns:
+
+- Synthetic option prices approximate puts and do not contain historical chains,
+  spreads, volume or open interest. Historical earnings guards are unavailable.
+  Liquidity/spread rejection counts and average spreads are therefore unknown,
+  not claims that all candidates passed those live filters.
+- Entry fills are modeled at the signal-bar close; real execution occurs after
+  that completed bar. Limit fill probability, slippage and fees are not simulated.
+- Alpaca repricing selects the preferred strike/DTE before checking price and
+  requires exact entry/exit-date bars. It does not shop for cheap substitutes or
+  use a previous day's bar as an exit. Historical Greeks/quote-quality data are
+  unavailable; strike selection approximates target delta.
+- Alpaca repricing validates candidate entry/exit dates from the synthetic/technical
+  path; it does not replay actual-option intratrade stops. Historical drawdown is
+  closed-trade equity only. These limitations must be considered before comparing
+  either backtest with actual paper fills.
+- `--compare-signals` is retained as an isolated $100 bearish-underlying diagnostic;
+  it is not an option portfolio or a capital-limit experiment.
+
+No profitability or parameter optimization is claimed by this implementation.
 
 ## Offline checks
 
-With dependencies installed, run:
-
 ```bash
-APCA_API_KEY_ID=test APCA_API_SECRET_KEY=test python -m unittest -q
+APCA_API_KEY_ID=test APCA_API_SECRET_KEY=test python3 -m unittest -q
 ```
 
-The suite uses dummy credentials and mocked broker calls; it places no orders.
+Tests use dummy credentials, temporary research ledgers and mocked broker calls.
+They place no orders. Configuration and ownership assertions cover the $500 cap,
+rounded limits, one-contract size, pending/partial fills, cancellation confirmation,
+shared allocation, foreign positions/orders, rejection data and historical comparisons.
