@@ -84,7 +84,12 @@ Orders use `long_put_<underlying>_<unique-id>` client IDs and explicit
 `buy_to_open` / `sell_to_close` intents. Logs include `long_put`; the CSV adds
 `bot_strategy` while retaining the variant in `strategy`. Existing local
 `regular`/`max_100` put rows and tracked `oi-` orders remain readable. Explicit
-foreign strategy identifiers are excluded.
+foreign strategy identifiers are excluded. Before reconciling or canceling an order,
+the broker order must also be a single-leg put with explicit `buy_to_open` for a
+buy or `sell_to_close` for a sell. Calls, stock orders, short-put opening/closing
+orders, multi-leg orders and missing/unknown intents are ignored even if their
+client IDs match. This includes legacy orders without explicit intent; their
+reservations remain pending rather than assuming their strategy type.
 
 New orders are blocked if the same contract already exists in the account or has
 an open account order. Exits require owned long-put quantity and sufficient broker

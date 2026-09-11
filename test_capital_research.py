@@ -325,7 +325,7 @@ class FlowRegressionTests(unittest.TestCase):
             analytics.record_event('ORDER_SUBMITTED',strategy='regular',underlying='SPY',
                 option_symbol=SYMBOL,qty=1,price=4,order_id='id',order_side='buy')
             order=NS(symbol=SYMBOL,client_order_id='long_put_SPY_x',side='buy',
-                     status='partially_filled',filled_qty='.5',filled_avg_price='3.9')
+                     position_intent='buy_to_open',status='partially_filled',filled_qty='.5',filled_avg_price='3.9')
             with patch.object(trader.trading_client,'get_order_by_id',return_value=order), \
                  patch.object(trader.trading_client,'cancel_order_by_id') as cancel:
                 trader.reconcile_order_fills()
@@ -387,6 +387,48 @@ class ConfirmedExpirationTests(unittest.TestCase):
             self.assertEqual(report['premium_lost'], 400)
             self.assertEqual(report['ending_virtual_capital'], 24600)
             self.assertEqual(research.capital_snapshot()['employed'], 0)
+
+
+class LongPutOrderTypeTests(unittest.TestCase):
+    def test_wrong_or_unknown_order_types_are_never_managed(self):
+        cases = [
+            (SYMBOL[:9]+'C'+SYMBOL[10:], 'buy', 'buy_to_open', None),
+            ('SPY', 'buy', 'buy_to_open', None),
+            (SYMBOL, 'sell', 'sell_to_open', None),
+            (SYMBOL, 'buy', 'buy_to_close', None),
+            (SYMBOL, 'buy', None, None),
+            (SYMBOL, 'sell', 'buy_to_open', None),
+            (SYMBOL, 'buy', 'buy_to_open', [NS(symbol='SPY')]),
+            ('SPY269999P00500000', 'buy', 'buy_to_open', None),
+        ]
+        for symbol, side, intent, legs in cases:
+            with self.subTest(symbol=symbol, side=side, intent=intent, legs=legs):
+                submitted={'id':dict(option_symbol=symbol, order_side=side, qty=1,
+                                     timestamp='2020-01-01T12:00:00')}
+                order=NS(symbol=symbol, side=side, position_intent=intent, legs=legs,
+                         client_order_id='long_put_SPY_test', status='new', filled_qty=0)
+                with patch.object(trader, 'get_submitted_orders', return_value=submitted), \
+                     patch.object(trader.trading_client, 'get_order_by_id', return_value=order), \
+                     patch.object(trader.trading_client, 'cancel_order_by_id') as cancel, \
+                     patch.object(trader, 'record_event') as record:
+                    trader.reconcile_order_fills()
+                cancel.assert_not_called()
+                record.assert_not_called()
+
+    def test_owned_explicit_long_put_orders_can_be_cancelled(self):
+        for side, intent in [('buy', PositionIntent.BUY_TO_OPEN),
+                             ('sell', PositionIntent.SELL_TO_CLOSE)]:
+            with self.subTest(side=side):
+                submitted={'id':dict(option_symbol=SYMBOL, order_side=side, qty=1,
+                                     timestamp='2020-01-01T12:00:00')}
+                order=NS(symbol=SYMBOL, side=side, position_intent=intent,
+                         client_order_id='long_put_SPY_test', status='new', filled_qty=0)
+                with patch.object(trader, 'get_submitted_orders', return_value=submitted), \
+                     patch.object(trader.trading_client, 'get_order_by_id', return_value=order), \
+                     patch.object(trader.trading_client, 'cancel_order_by_id') as cancel, \
+                     patch.object(trader, 'record_event'):
+                    trader.reconcile_order_fills()
+                cancel.assert_called_once_with('id')
 
 
 if __name__ == '__main__':

@@ -643,6 +643,24 @@ def _strategy_has_pending_order(strategy, option_symbol, side=None):
     return False
 
 
+def is_long_put_order(order):
+    """Require explicit long-put intent; a strategy tag alone is insufficient."""
+    try:
+        parsed = parse_option_symbol(getattr(order, "symbol", ""))
+    except (TypeError, ValueError):
+        return False
+    if not parsed or parsed["option_type"] != "put" or getattr(order, "legs", None):
+        return False
+    side = getattr(order, "side", None)
+    side = getattr(side, "value", side)
+    intent = getattr(order, "position_intent", None)
+    intent = getattr(intent, "value", intent)
+    return (side, intent) in {
+        ("buy", "buy_to_open"),
+        ("sell", "sell_to_close"),
+    }
+
+
 def reconcile_order_fills():
     """Poll only ledger-owned orders; reserve until confirmed terminal status."""
     for order_id, submitted in get_submitted_orders().items():
@@ -650,7 +668,8 @@ def reconcile_order_fills():
             order = trading_client.get_order_by_id(order_id)
             client_id = str(getattr(order, "client_order_id", ""))
             side = str(getattr(getattr(order, "side", ""), "value", getattr(order, "side", "")))
-            if (order.symbol != submitted.get("option_symbol") or
+            if (not is_long_put_order(order) or
+                    order.symbol != submitted.get("option_symbol") or
                     side != submitted.get("order_side") or
                     not client_id.startswith(("long_put_", "oi-"))):
                 bot_log(f"Ignoring order with unverified long_put ownership: {order_id}")
