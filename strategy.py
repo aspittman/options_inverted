@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 from time import monotonic, sleep
 from requests.exceptions import RequestException
+from alpaca.common.exceptions import APIError
 from alpaca.data.enums import DataFeed
 from alpaca.data.requests import StockBarsRequest
 from alpaca.data.timeframe import TimeFrame
@@ -55,12 +56,13 @@ def _download_daily_history(symbol):
 
 
 def wait_for_market_open(trading_client):
+    """Wait for a confirmed open clock, retrying broker and transport failures."""
     import time
 
     while True:
         try:
             clock = trading_client.get_clock()
-        except RequestException as e:
+        except (APIError, RequestException) as e:
             bot_log(f"Could not get market clock from Alpaca: {e}. Retrying in 60 seconds.")
             time.sleep(60)
             continue
