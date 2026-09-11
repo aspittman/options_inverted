@@ -46,6 +46,36 @@ experiments. `BACKTEST_STARTING_CASH` is now a code compatibility alias for
 `VIRTUAL_STARTING_CAPITAL`; its old environment setting no longer overrides the
 allocation.
 
+## Expanded research universe
+
+The default `UNIVERSE_PROFILE=expanded` keeps all 40 original symbols and adds
+32 candidates, for 72 total. Both regular and swing use this universe, as do the
+historical runs. Set `UNIVERSE_PROFILE=original` to compare with the old watchlist.
+The original ordering is preserved; contracts are not prioritized by cheapness.
+
+| Category | Added symbols |
+|---|---|
+| Sector/industry ETFs | XLF, XLE, XLP, XLU, XLRE, XLB, KRE, XBI |
+| International ETFs | EEM, EFA, FXI, EWZ |
+| Precious-metals funds | GDX, GDXJ, SLV, IAU |
+| Bond ETFs | TLT, HYG |
+| Stocks | F, GM, T, VZ, KMI, SOFI, SNAP, UBER, RIVN, PINS, CCL, AAL, DAL, WFC |
+
+These broaden the lower-notional candidate pool; share prices and actual put
+premiums change, and membership does not certify affordability or liquidity.
+Issuer fund classifications are available from [State Street](https://www.ssga.com/us/en/intermediary/capabilities/equities/sector-investing/select-sector-etfs)
+and [iShares](https://www.ishares.com/us/products/etf-investments).
+No leveraged or inverse ETFs were added. Existing expensive symbols remain eligible
+when their preferred contracts qualify.
+
+Added symbols have explicit correlation groups; related additions share existing
+sector limits. All added ETFs/trusts bypass corporate earnings lookups, while
+stocks retain the earnings guard. The SPY bearish regime, fresh daily regular/swing
+signals, 60–90 DTE, −0.60 delta target, liquidity/spread tests, $500 premium ceiling,
+one-contract size, and portfolio limits are unchanged. An expanded universe will
+still produce no entries when the SPY regime blocks trading. Restart the running
+bot to load the expanded list; startup logs show the profile and symbol count.
+
 ## Strategy rules
 
 Signals use completed daily bars. The SPY regime requires price and its 50-day

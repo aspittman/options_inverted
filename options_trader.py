@@ -30,6 +30,7 @@ from alpaca.common.exceptions import APIError
 from requests.exceptions import RequestException
 
 from config import (
+    NON_CORPORATE_UNDERLYINGS,
     STRATEGY_ID, VIRTUAL_STARTING_CAPITAL, MAX_OPTION_PREMIUM_PER_TRADE,
     MAX_CONTRACTS_PER_TRADE, MIN_DTE, MAX_DTE, MAX_POSITIONS, MAX_POSITIONS_PER_CORRELATION_GROUP,
     correlation_group, ENABLE_NEW_ENTRIES,
@@ -73,7 +74,7 @@ trading_client = TradingClient(API_KEY, SECRET_KEY, paper=ALPACA_PAPER)
 option_data_client = OptionHistoricalDataClient(API_KEY, SECRET_KEY)
 stock_data_client = StockHistoricalDataClient(API_KEY, SECRET_KEY)
 
-_NON_CORPORATE_UNDERLYINGS = {"SPY", "QQQ", "IWM", "DIA"}
+_NON_CORPORATE_UNDERLYINGS = NON_CORPORATE_UNDERLYINGS
 _earnings_cache = {}
 
 
@@ -324,7 +325,7 @@ def has_earnings_soon(underlying, skip_days=EARNINGS_SKIP_DAYS):
     last_skip_date = today + timedelta(days=skip_days)
     symbol = underlying.upper()
 
-    # Broad-market ETFs do not report corporate earnings. Asking Yahoo for an
+    # ETFs and trusts do not report corporate earnings. Asking Yahoo for an
     # earnings calendar produces a misleading "possibly delisted" error.
     if symbol in _NON_CORPORATE_UNDERLYINGS:
         return False

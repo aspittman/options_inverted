@@ -1,7 +1,7 @@
 import time
 import fcntl
 from pathlib import Path
-from config import LOG_FILE
+from config import LOG_FILE, UNIVERSE_PROFILE
 from research import qualified_opportunity, update_opportunity, capital_snapshot
 
 from config import (
@@ -70,6 +70,7 @@ def _run_bot():
     wait_for_market_open(trading_client)
 
     bot_log("Starting options paper trading bot...")
+    bot_log(f"Universe profile={UNIVERSE_PROFILE} | symbols={len(UNDERLYINGS)}")
     if not ENABLE_NEW_ENTRIES:
         bot_log("New entries are disabled; existing positions will still be managed.")
     last_entry_bar_date = None

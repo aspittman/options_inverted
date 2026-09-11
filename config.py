@@ -44,7 +44,7 @@ def require_alpaca_credentials():
 
     return API_KEY, SECRET_KEY
 
-UNDERLYINGS = [
+ORIGINAL_UNDERLYINGS = [
     "SPY",
     "QQQ",
     "IWM",
@@ -86,6 +86,31 @@ UNDERLYINGS = [
     "DIS",
     "BA",
 ]
+
+
+# Candidate expansion, not a price-based contract selector. Every candidate must
+# still pass the original bearish signal, DTE/delta, liquidity, spread and premium
+# gates. No leveraged/inverse funds are added to change the strategy's direction.
+AFFORDABLE_UNIVERSE_ADDITIONS = [
+    "XLF", "XLE", "XLP", "XLU", "XLRE", "XLB", "KRE", "XBI",
+    "EEM", "EFA", "FXI", "EWZ", "GDX", "GDXJ", "SLV", "IAU", "TLT", "HYG",
+    "F", "GM", "T", "VZ", "KMI", "SOFI", "SNAP", "UBER", "RIVN",
+    "PINS", "CCL", "AAL", "DAL", "WFC",
+]
+# Funds do not have corporate earnings dates; stock earnings guards remain active.
+NON_CORPORATE_UNDERLYINGS = {
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLP", "XLU", "XLRE",
+    "XLB", "KRE", "XBI", "EEM", "EFA", "FXI", "EWZ", "GDX", "GDXJ",
+    "SLV", "IAU", "TLT", "HYG",
+}
+EXPANDED_UNDERLYINGS = list(dict.fromkeys(
+    ORIGINAL_UNDERLYINGS + AFFORDABLE_UNIVERSE_ADDITIONS
+))
+UNIVERSE_PROFILE = os.getenv("UNIVERSE_PROFILE", "expanded").strip().lower()
+if UNIVERSE_PROFILE not in {"original", "expanded"}:
+    raise ValueError("UNIVERSE_PROFILE must be 'original' or 'expanded'")
+UNDERLYINGS = list(ORIGINAL_UNDERLYINGS if UNIVERSE_PROFILE == "original"
+                   else EXPANDED_UNDERLYINGS)
 
 DOLLARS_PER_TRADE = 100
 
@@ -169,10 +194,20 @@ CORRELATION_GROUPS = {
         "AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "GOOG", "TSLA",
         "AMD", "NFLX", "AVGO", "CRM", "ORCL", "ADBE", "INTC", "QCOM", "MU",
     },
-    "financials": {"JPM", "BAC", "GS", "MS", "C"},
-    "energy": {"XOM", "CVX", "COP", "SLB"},
-    "healthcare": {"UNH", "LLY", "JNJ", "PFE", "MRK"},
-    "consumer_industrial": {"COST", "WMT", "HD", "DIS", "BA"},
+    "financials": {"JPM", "BAC", "GS", "MS", "C", "WFC", "SOFI", "XLF", "KRE"},
+    "energy": {"XOM", "CVX", "COP", "SLB", "KMI", "XLE"},
+    "healthcare": {"UNH", "LLY", "JNJ", "PFE", "MRK", "XBI"},
+    "consumer_industrial": {
+        "COST", "WMT", "HD", "DIS", "BA", "F", "GM", "UBER", "RIVN",
+        "CCL", "AAL", "DAL", "XLP",
+    },
+    "communications": {"T", "VZ", "SNAP", "PINS"},
+    "international": {"EEM", "EFA", "FXI", "EWZ"},
+    "precious_metals": {"GDX", "GDXJ", "SLV", "IAU"},
+    "rates_credit": {"TLT", "HYG"},
+    "utilities": {"XLU"},
+    "real_estate": {"XLRE"},
+    "materials": {"XLB"},
 }
 
 
