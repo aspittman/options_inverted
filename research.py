@@ -54,7 +54,7 @@ def is_own_event(row):
     # those local long-put rows; explicit foreign identifiers always win.
     if row.get('bot_strategy') not in (None, '', STRATEGY_ID):
         return False
-    if row.get('strategy', '') not in ('', 'regular', 'max_100', STRATEGY_ID):
+    if row.get('strategy', '') not in ('', 'regular', 'oasis', 'max_100', STRATEGY_ID):
         return False
     symbol = row.get('option_symbol', '')
     return not symbol or bool(PUT_RE.fullmatch(symbol))

@@ -30,6 +30,7 @@ from config import (
     SCAN_INTERVAL_SECONDS
 )
 
+from oasis import refresh_oasis_data, get_oasis_signal_state, entry_window
 from analytics import (
     cooldown_active,
     get_strategy_open_lots,
@@ -59,6 +60,7 @@ from options_trader import (
     log_analytics_summary,
     log_account_info,
     reconcile_order_fills,
+    cancel_blocked_entry_orders,
     bootstrap_legacy_positions,
     reconcile_strategy_lots_with_broker,
 )
@@ -79,6 +81,10 @@ def _run_bot():
         # Re-check every cycle so stale overnight/weekend quotes are not used.
         wait_for_market_open(trading_client)
         reconcile_order_fills()
+        market_clock = trading_client.get_clock()
+        cancel_blocked_entry_orders(market_clock)
+        reconcile_order_fills()
+        refresh_oasis_data(UNDERLYINGS, stock_data_client, trading_client, market_clock.timestamp)
         bootstrap_legacy_positions()
         reconcile_strategy_lots_with_broker()
         bot_positions = log_open_option_positions()
@@ -106,18 +112,11 @@ def _run_bot():
             continue
 
         entry_bar_date = latest_completed_bar_date(MARKET_REGIME_SYMBOL)
-        if entry_bar_date is None:
-            bot_log("CYCLE SUMMARY | exits monitored | entry scan unavailable: no daily bars")
-            time.sleep(SCAN_INTERVAL_SECONDS)
-            continue
-        if entry_bar_date == last_entry_bar_date:
-            bot_log(
-                f"CYCLE SUMMARY | exits monitored | entry scan not due "
-                f"(last completed bar {entry_bar_date})"
-            )
-            time.sleep(SCAN_INTERVAL_SECONDS)
-            continue
-        last_entry_bar_date = entry_bar_date
+        daily_due = entry_bar_date is not None and entry_bar_date != last_entry_bar_date
+        if daily_due:
+            last_entry_bar_date = entry_bar_date
+        active_variants = [v for v in PAPER_STRATEGIES
+                           if (entry_window(market_clock) if v.get("intraday") else daily_due)]
 
         checked = 0
         new_signals = 0
@@ -147,12 +146,12 @@ def _run_bot():
             if not market_regime_ok:
                 continue
 
-            for variant in PAPER_STRATEGIES:
+            for variant in active_variants:
                 name = variant["name"]
-                state = get_bearish_signal_state(
+                state = get_oasis_signal_state(underlying) if variant.get("intraday") else get_bearish_signal_state(
                     underlying, MA_SHORT, MA_LONG, MACD_FAST, MACD_SLOW,
                     MACD_SIGNAL, signal=variant["signal"])
-                if not state.get("data_available", True) or not state["bearish"] or not state["new_signal"]:
+                if not state.get("data_available", True) or not state.get("bearish", state.get("bullish", False)) or not state["new_signal"]:
                     continue
                 # Only genuine fresh signals enter the research opportunity log.
                 # Guards are applied afterward, so their rejections remain data.
@@ -167,7 +166,7 @@ def _run_bot():
                                      reason="signal_bar_already_traded")
                         blocked += 1
                         continue
-                    if cooldown_active(name, underlying, REENTRY_COOLDOWN_DAYS):
+                    if not variant.get("intraday") and cooldown_active(name, underlying, REENTRY_COOLDOWN_DAYS):
                         record_event("SKIP", strategy=name, underlying=underlying,
                                      reason="reentry_cooldown")
                         blocked += 1
@@ -187,7 +186,6 @@ def _run_bot():
                     if submitted: orders_submitted += 1
                     else: blocked += 1
 
-            time.sleep(2)
 
         bot_log(
             f"CYCLE SUMMARY | daily bar={entry_bar_date} | symbols checked={checked} | "

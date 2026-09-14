@@ -173,12 +173,14 @@ PAPER_STRATEGIES = (
         "max_holding_days": 20,
     },
     {
-        "name": "max_100",
-        "signal": "daily_swing",
+        "name": "oasis",
+        "signal": "intraday_oasis",
         "max_premium": MAX_100_PREMIUM_PER_TRADE,
         "underlying_trailing_stop": UNDERLYING_TRAILING_STOP_PERCENT,
-        "underlying_take_profit": 0.06,
-        "max_holding_days": 15,
+        "underlying_take_profit": None,
+        "max_holding_days": None,
+        "option_stop_loss": 0.20,
+        "intraday": True,
     },
 )
 ALLOW_DUPLICATE_CONTRACTS = _env_bool("ALLOW_DUPLICATE_CONTRACTS", False)
@@ -245,7 +247,10 @@ BACKTEST_ENTRY_DTE = 75
 BACKTEST_OPTION_TIME_VALUE_PERCENT = 0.12
 BACKTEST_STARTING_CASH = VIRTUAL_STARTING_CAPITAL  # compatibility alias; CLI can override
 OPTION_STOP_LOSS_PERCENT = _env_float("OPTION_STOP_LOSS_PERCENT", 0.30)
-OPTION_TRAILING_STOP_PERCENT = _env_float("OPTION_TRAILING_STOP_PERCENT", 0.0)
+# Oasis-only premium trail; regular keeps its existing underlying trail.
+OPTION_TRAILING_STOP_PERCENT = _env_float("OPTION_TRAILING_STOP_PERCENT", 0.20)
+if not 0 <= OPTION_TRAILING_STOP_PERCENT < 1:
+    raise ValueError("OPTION_TRAILING_STOP_PERCENT must be at least zero and less than one")
 OPTION_TAKE_PROFIT_PERCENT = 1.00
 EXIT_DTE = _env_int("EXIT_DTE", 30)
 MAX_HOLDING_DAYS = 20
@@ -256,7 +261,12 @@ EXIT_LIMIT_TIMEOUT_MINUTES = _env_int("EXIT_LIMIT_TIMEOUT_MINUTES", 2)
 OPTION_TYPE = "put"  # buy puts to open; sell owned puts to close
 CONTRACT_QTY = MAX_CONTRACTS_PER_TRADE
 
-SCAN_INTERVAL_SECONDS = 300
+SCAN_INTERVAL_SECONDS = 60
+LEGACY_SWING_STRATEGY = {
+    "name": "max_100", "signal": "daily_swing",
+    "underlying_trailing_stop": UNDERLYING_TRAILING_STOP_PERCENT,
+    "underlying_take_profit": 0.06, "max_holding_days": 15,
+}
 
 # Keep real-money research records separate if live mode is explicitly selected.
 PROJECT_DIR = Path(__file__).resolve().parent

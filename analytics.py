@@ -498,3 +498,43 @@ def get_latest_entry_price(underlying, option_symbol):
                     latest_price = None
 
     return latest_price
+
+
+def latest_underlying_loss_dates():
+    from loss_guard import latest_loss_dates
+    return latest_loss_dates(r for r in read_events() if r.get("event") != "POSITION_MISSING")
+
+
+def loss_reentry_block_active(underlying, today=None):
+    from loss_guard import blocked
+    from portfolio_loss_guard import portfolio_blocked
+    return blocked(underlying, latest_underlying_loss_dates(), today) or portfolio_blocked(underlying, today)
+
+
+def get_option_high_water_marks():
+    """Replay entry fills and observed premium highs for the current holding only."""
+    from math import isfinite
+    quantities, highs = {}, {}
+    for row in read_events():
+        key = (row.get("strategy", ""), row.get("option_symbol", ""))
+        if not all(key):
+            continue
+        event = row.get("event")
+        # An unresolved broker mismatch does not close an owned long-put lot.
+        if event in {"ORDER_FILL", "ORDER_PARTIAL_FILL", "EXPIRATION_CONFIRMED"}:
+            qty = float(row.get("qty") or 0)
+            if row.get("order_side") == "buy":
+                if quantities.get(key, 0) <= 0:
+                    highs.pop(key, None)
+                quantities[key] = quantities.get(key, 0) + qty
+            elif row.get("order_side") == "sell":
+                quantities[key] = max(0, quantities.get(key, 0) - qty)
+                if quantities[key] <= 0:
+                    highs.pop(key, None)
+        if quantities.get(key, 0) <= 0:
+            continue
+        if event in {"ORDER_FILL", "ORDER_PARTIAL_FILL", "OPTION_TRAIL_SNAPSHOT", "RISK_SNAPSHOT"}:
+            price = float(row.get("price") or 0)
+            if isfinite(price) and price > 0:
+                highs[key] = max(highs.get(key, price), price)
+    return highs

@@ -50,12 +50,16 @@ from config import (
     OPTION_STOP_LOSS_PERCENT,
     OPTION_TRAILING_STOP_PERCENT,
     PAPER_STRATEGIES,
+    LEGACY_SWING_STRATEGY,
     BOT_PERFORMANCE_START_DATE,
     LIMIT_ORDER_TIMEOUT_MINUTES,
     EXIT_LIMIT_TIMEOUT_MINUTES,
     require_alpaca_credentials
 )
+from oasis import entry_window, session_exit
 from analytics import (
+    get_option_high_water_marks,
+    loss_reentry_block_active,
     get_owned_option_symbols,
     get_strategy_open_lots,
     get_underlying_low_water_marks,
@@ -105,7 +109,6 @@ def calculate_underlying_trailing_stop(entry_price, current_price, prior_low, tr
 
 OPTION_SYMBOL_RE = re.compile(r"^([A-Z.]+)(\d{6})([CP])(\d{8})$")
 CONTRACT_MULTIPLIER = 100
-_option_high_water_marks = {}
 
 
 def parse_option_symbol(symbol):
@@ -708,6 +711,27 @@ def reconcile_order_fills():
             bot_log(f"Could not reconcile owned order {order_id}: {exc}")
 
 
+def cancel_blocked_entry_orders(clock):
+    for order_id, row in get_submitted_orders().items():
+        if row.get("order_side") != "buy":
+            continue
+        if not (loss_reentry_block_active(row.get("underlying", ""))
+                or row.get("strategy") == "oasis" and not entry_window(clock)):
+            continue
+        try:
+            order = trading_client.get_order_by_id(order_id)
+            if (not is_long_put_order(order) or order.symbol != row.get("option_symbol")
+                    or str(getattr(order.side, "value", order.side)) != "buy"
+                    or not str(order.client_order_id).startswith(("long_put_", "oi-"))):
+                continue
+            trading_client.cancel_order_by_id(order_id)
+            record_event("CANCEL_REQUESTED", strategy=row.get("strategy", ""),
+                         underlying=row.get("underlying", ""), order_id=order_id,
+                         reason="loss_block_or_oasis_cutoff")
+        except (ValueError, APIError, RequestException) as exc:
+            bot_log(f"Could not cancel blocked entry {order_id}: {exc}")
+
+
 def bootstrap_legacy_positions():
     """Do not adopt account inventory: a historical symbol is not proof of ownership."""
     return None
@@ -747,6 +771,14 @@ def buy_option_contract(
     if not parsed or parsed["option_type"] != "put" or qty <= 0:
         raise ValueError("Entries require a put contract and positive quantity")
     underlying = parsed["underlying"]
+    if loss_reentry_block_active(underlying):
+        record_event("SKIP", strategy=strategy, underlying=underlying, reason="shared_loss_reentry_block")
+        return False
+    if any(r.get("underlying") == underlying and r.get("order_side") == "sell"
+           for r in get_submitted_orders().values()):
+        return False
+    if strategy == "oasis" and not entry_window(trading_client.get_clock()):
+        return False
     if strategy not in {item["name"] for item in PAPER_STRATEGIES}:
         raise ValueError("Unknown long_put signal variant")
     if not ENABLE_NEW_ENTRIES:
@@ -964,8 +996,10 @@ def manage_underlying_exits(
         position.symbol: position for position in get_options_inverted_positions()
     }
     lots = get_strategy_open_lots()
+    option_highs = get_option_high_water_marks() if any(k[0] == "oasis" for k in lots) else {}
     underlying_low_water_marks = get_underlying_low_water_marks()
-    for underlying in underlyings:
+    clock = trading_client.get_clock() if any(k[0] == "oasis" for k in lots) else None
+    for underlying in dict.fromkeys([*underlyings, *(k[1] for k in lots)]):
         underlying_lots = [
             (key, lot) for key, lot in lots.items() if key[1] == underlying
         ]
@@ -976,7 +1010,7 @@ def manage_underlying_exits(
 
         for (strategy, _, option_symbol), lot in underlying_lots:
             variant = next(
-                (item for item in PAPER_STRATEGIES if item["name"] == strategy),
+                (item for item in (*PAPER_STRATEGIES, LEGACY_SWING_STRATEGY) if item["name"] == strategy),
                 {
                     "signal": "daily_trend",
                     "underlying_trailing_stop": trailing_stop_pct,
@@ -1014,27 +1048,36 @@ def manage_underlying_exits(
                         f"Could not parse entry timestamp for {option_symbol}: {opened_at}"
                     )
             option_high_water_key = (strategy, option_symbol)
-            option_high_water = max(
-                _option_high_water_marks.get(option_high_water_key, option_price),
-                option_price,
-            )
-            _option_high_water_marks[option_high_water_key] = option_high_water
+            prior_high = option_highs.get(option_high_water_key, option_entry)
+            # The entry premium seeds the trail; observations only ratchet it upward.
+            from math import isfinite
+            valid_option_price = isfinite(option_price) and option_price > 0
+            option_high_water = max(prior_high, option_entry, option_price if valid_option_price else 0)
+            if variant.get("intraday") and valid_option_price and option_high_water > prior_high:
+                record_event(
+                    "OPTION_TRAIL_SNAPSHOT", strategy=strategy, underlying=underlying,
+                    option_symbol=option_symbol, qty=lot["qty"], price=option_high_water,
+                    details=f"option_trailing_stop={option_high_water * (1-OPTION_TRAILING_STOP_PERCENT):.6f}",
+                )
+            option_highs[option_high_water_key] = option_high_water
 
             if dte <= EXIT_DTE:
                 exit_reason = f"expiration_management_dte_{dte}"
-            elif option_plpc <= -OPTION_STOP_LOSS_PERCENT:
+            elif option_entry > 0 and option_price <= option_entry * (1-variant.get("option_stop_loss", OPTION_STOP_LOSS_PERCENT)):
                 exit_reason = f"option_stop_loss_{option_plpc:.2%}"
-            elif held_weekdays >= variant["max_holding_days"]:
+            elif variant["max_holding_days"] is not None and held_weekdays >= variant["max_holding_days"]:
                 exit_reason = f"max_holding_days_{held_weekdays}"
             elif (
-                OPTION_TRAILING_STOP_PERCENT > 0
+                variant.get("intraday")
+                and OPTION_TRAILING_STOP_PERCENT > 0
+                and valid_option_price
                 and option_high_water > 0
                 and option_price <= option_high_water * (1 - OPTION_TRAILING_STOP_PERCENT)
             ):
                 drawdown = (option_price - option_high_water) / option_high_water
                 exit_reason = f"option_trailing_stop_{drawdown:.2%}"
 
-            if current_price and entry_price:
+            if current_price and entry_price and not variant.get("intraday"):
                 risk_key = (strategy, underlying, option_symbol)
                 previous_low = underlying_low_water_marks.get(risk_key, entry_price)
                 trailing_pct = variant["underlying_trailing_stop"]
@@ -1064,12 +1107,9 @@ def manage_underlying_exits(
                     change_pct = (entry_price - current_price) / entry_price
                     exit_reason = f"underlying_take_profit_{change_pct:.2%}"
 
+            if variant.get("intraday"):
+                exit_reason = session_exit(clock, opened_at) or exit_reason
             if exit_reason:
                 close_strategy_lot(
                     strategy, underlying, option_symbol, lot["qty"], exit_reason
                 )
-
-    open_keys = {(strategy, symbol) for strategy, _, symbol in lots}
-    for key in list(_option_high_water_marks):
-        if key not in open_keys:
-            del _option_high_water_marks[key]

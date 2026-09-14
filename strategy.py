@@ -272,6 +272,9 @@ def is_underlying_exit_signal(
     symbol, ma_short, ma_long, macd_fast, macd_slow, macd_signal,
     signal="daily_trend",
 ):
+    if signal == "intraday_oasis":
+        from oasis import oasis_exit_signal
+        return oasis_exit_signal(symbol)
     try:
         close = _completed_daily_close(symbol)
         if close is None:
